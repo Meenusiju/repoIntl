@@ -78,16 +78,38 @@ export async function callAgent(options: CallAgentOptions): Promise<string> {
       try {
         return await attempt();
       } catch (retryErr: any) {
+        console.error(
+          "[llm-client] Retry also failed. Full error:",
+          retryErr
+        );
         throw new Error(
-          `Anthropic API error after retry: ${retryErr?.message || retryErr}`
+          `Anthropic API error after retry: ${describeError(retryErr)}`
         );
       }
     }
     if (status === 401) {
       throw new Error("Anthropic API error: invalid API key (401).");
     }
-    throw new Error(`Anthropic API error: ${err?.message || err}`);
+    console.error("[llm-client] Anthropic call failed. Full error:", err);
+    throw new Error(`Anthropic API error: ${describeError(err)}`);
   }
+}
+
+/**
+ * Builds a more diagnostic error message than `err.message` alone, since the
+ * Anthropic SDK's generic "Connection error." message hides the actual
+ * underlying cause (DNS failure, TLS error, timeout, ECONNRESET, etc.) in
+ * `err.cause`. Surfacing it makes production issues (e.g. on Vercel) much
+ * easier to diagnose from logs alone.
+ */
+function describeError(err: any): string {
+  const parts: string[] = [];
+  if (err?.message) parts.push(err.message);
+  if (err?.cause?.message) parts.push(`cause: ${err.cause.message}`);
+  if (err?.cause?.code) parts.push(`code: ${err.cause.code}`);
+  if (err?.code && err.code !== err?.cause?.code) parts.push(`code: ${err.code}`);
+  if (err?.status) parts.push(`status: ${err.status}`);
+  return parts.length > 0 ? parts.join(" | ") : String(err);
 }
 
 /**
