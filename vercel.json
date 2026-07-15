@@ -2,7 +2,7 @@
   "version": 2,
   "installCommand": "npm install",
   "functions": {
-    "src/api.ts": {
+    "api/index.ts": {
       "memory": 2048,
       "maxDuration": 60,
       "includeFiles": "public/**"
@@ -11,7 +11,7 @@
   "rewrites": [
     {
       "source": "/(.*)",
-      "destination": "src/api.ts"
+      "destination": "/api/index.ts"
     }
   ]
 }
