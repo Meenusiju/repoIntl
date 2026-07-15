@@ -199,8 +199,23 @@ app.get("/api/repos/:repoId", async (req, res) => {
   res.json(response);
 });
 
-app.get("/api/repos", (req, res) => {
-  res.json(Array.from(inMemoryStatus.values()));
+app.get("/api/repos", async (req, res) => {
+  // Don't rely solely on inMemoryStatus here: on Vercel each serverless
+  // instance starts with an empty map, and hydrateStatusFromDisk() at
+  // module load is fire-and-forget (not awaited), so a request can race
+  // ahead of it on a cold start. Read the authoritative list from storage
+  // (Supabase in production, disk locally) every time, merging in-memory
+  // state on top so live in-flight progress updates still show up.
+  try {
+    const repoIds = await listAllOnboardedRepoIds();
+    const metas = await Promise.all(
+      repoIds.map(async (repoId) => inMemoryStatus.get(repoId) || (await loadMetadata(repoId)))
+    );
+    res.json(metas.filter((m): m is RepoMetadata => Boolean(m)));
+  } catch (err: any) {
+    console.error("[repos] Failed to list repos:", err.message);
+    res.status(500).json({ error: "Failed to list repos" });
+  }
 });
 
 /**
