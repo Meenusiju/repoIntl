@@ -19,6 +19,11 @@ import {
 import { runOnboardWorkflow } from "./mastra/workflows/onboard-repo";
 import { indexIntakeReport } from "./chroma/indexing";
 import { handleQuery } from "./query/query-handler";
+import { parseChangedFiles, determineAffectedSections } from "./github/git-diff-parser";
+import { runTargetedAnalysis } from "./merge-analysis/targeted-analysis";
+import { updateIntakeReport } from "./merge-analysis/section-updater";
+import { computeDocDelta } from "./merge-analysis/doc-delta";
+import { createDocsPR } from "./github/pr-creator";
 import {
   RepoMetadata,
   OnboardRequestBody,
@@ -305,12 +310,93 @@ app.post("/api/webhooks/github", (req, res) => {
     return;
   }
 
-  console.log(`[webhook] Push to ${repoUrl} (${ref}) by ${pusher || "unknown"} — re-onboarding ${repoId}`);
-  runOnboardingPipeline(repoId, repoUrl).catch((err) => {
-    console.error(`[webhook:${repoId}] Re-onboarding pipeline failed:`, err.message);
-    updateStatus(repoId, { status: "failed", error: err.message });
+  const commits = Array.isArray(payload.commits) ? payload.commits : [];
+  console.log(`[webhook] Push to ${repoUrl} (${ref}) by ${pusher || "unknown"} — running targeted doc update for ${repoId}`);
+  runMergeAnalysisPipeline(repoId, repoUrl, commits).catch((err) => {
+    console.error(`[webhook:${repoId}] Merge-analysis pipeline failed:`, err.message);
   });
 });
+
+/**
+ * Phase 4: instead of re-running the full 6-agent onboarding pipeline on
+ * every push, this only re-analyzes the intake-report sections affected by
+ * the files that actually changed, then opens a GitHub PR with the updated
+ * docs for human review. Nothing is auto-merged.
+ */
+async function runMergeAnalysisPipeline(
+  repoId: string,
+  repoUrl: string,
+  commits: Array<{ id: string; message: string; added?: string[]; removed?: string[]; modified?: string[] }>
+): Promise<void> {
+  if (commits.length === 0) {
+    console.log(`[merge-analysis:${repoId}] Push had no commits payload; nothing to analyze.`);
+    return;
+  }
+
+  const changedFiles = parseChangedFiles(commits);
+  if (changedFiles.length === 0) {
+    console.log(`[merge-analysis:${repoId}] No relevant changed files after filtering; skipping.`);
+    return;
+  }
+
+  const affectedSections = determineAffectedSections(changedFiles);
+  if (affectedSections.length === 0) {
+    console.log(`[merge-analysis:${repoId}] Changed files don't map to any tracked doc section; skipping.`);
+    return;
+  }
+
+  const oldReport = loadIntakeReport(repoId);
+  if (!oldReport) {
+    console.warn(`[merge-analysis:${repoId}] No existing intake report on disk; skipping (run a full onboard first).`);
+    return;
+  }
+
+  console.log(`[merge-analysis:${repoId}] Affected sections: ${affectedSections.join(", ")}. Re-downloading source for fresh analysis...`);
+  const sourceDir = await cloneRepo(repoUrl, repoId);
+  const fileList = listFiles(sourceDir);
+  const ctx = {
+    repoId,
+    repoPath: sourceDir,
+    fileList,
+    readFile: (rel: string) => readRepoFile(sourceDir, rel),
+  };
+
+  const newSections = await runTargetedAnalysis(ctx, affectedSections);
+  const delta = computeDocDelta(oldReport, newSections);
+
+  if (delta.changeCount === 0) {
+    console.log(`[merge-analysis:${repoId}] Re-analysis produced no substantive changes; not opening a PR.`);
+    return;
+  }
+
+  const updatedReport = updateIntakeReport(oldReport, newSections);
+  const commitHash = commits[commits.length - 1].id;
+
+  const pr = await createDocsPR({
+    repoUrl,
+    updatedReport,
+    commitHash,
+    changedFiles,
+    changedSections: delta.sections,
+    summary: delta.summary,
+  });
+
+  console.log(`[merge-analysis:${repoId}] Opened docs PR: ${pr.prUrl}`);
+
+  // Re-index the updated report so /api/query reflects the new content too,
+  // even before the PR is merged (dashboard chat should stay current).
+  saveIntakeReport(repoId, updatedReport);
+  try {
+    await indexIntakeReport(repoId, updatedReport);
+  } catch (err: any) {
+    console.warn(`[merge-analysis:${repoId}] Re-indexing after doc update failed (non-fatal): ${err.message}`);
+  }
+
+  updateStatus(repoId, {
+    lastDocsPrUrl: pr.prUrl,
+    lastDocsPrAt: new Date().toISOString(),
+  });
+}
 
 app.post("/api/query", async (req, res) => {
   const body: QueryRequestBody = req.body;

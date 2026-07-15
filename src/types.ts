@@ -6,6 +6,8 @@ export interface RepoMetadata {
   currentAgent?: string;
   progress?: number;
   error?: string;
+  lastDocsPrUrl?: string;
+  lastDocsPrAt?: string;
 }
 
 export type RepoStatus =
