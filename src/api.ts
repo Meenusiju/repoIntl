@@ -202,21 +202,42 @@ app.get("/api/repos", (req, res) => {
  * the header is missing, or the computed HMAC doesn't match.
  */
 function verifyGithubSignature(rawBody: Buffer | undefined, signatureHeader: string | undefined): boolean {
-  const secret = process.env.GITHUB_WEBHOOK_SECRET;
+  // .trim() guards against trailing newlines/whitespace that can sneak in
+  // when pasting the secret into the Vercel dashboard or GitHub's webhook
+  // secret field (the same class of bug that broke ANTHROPIC_API_KEY earlier).
+  const secret = process.env.GITHUB_WEBHOOK_SECRET?.trim();
   if (!secret) {
     console.warn("[webhook] GITHUB_WEBHOOK_SECRET is not set — rejecting webhook for safety.");
     return false;
   }
   if (!rawBody || !signatureHeader) {
+    console.warn(
+      `[webhook] Missing ${!rawBody ? "raw body" : "signature header"} — rejecting webhook.`
+    );
     return false;
   }
+  const trimmedSignature = signatureHeader.trim();
   const expected = "sha256=" + crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
   const expectedBuf = Buffer.from(expected);
-  const actualBuf = Buffer.from(signatureHeader);
+  const actualBuf = Buffer.from(trimmedSignature);
   if (expectedBuf.length !== actualBuf.length) {
+    // Never log the actual secret/signature values, but the lengths alone
+    // are a very useful diagnostic: if they differ, it's almost always a
+    // whitespace/encoding mismatch in the configured secret rather than a
+    // "real" attack, since both sides compute a fixed-length hex digest.
+    console.warn(
+      `[webhook] Signature length mismatch (expected ${expectedBuf.length} chars, got ${actualBuf.length}). ` +
+        `Check for extra whitespace/newlines in GITHUB_WEBHOOK_SECRET on both GitHub and Vercel.`
+    );
     return false;
   }
-  return crypto.timingSafeEqual(expectedBuf, actualBuf);
+  const valid = crypto.timingSafeEqual(expectedBuf, actualBuf);
+  if (!valid) {
+    console.warn(
+      "[webhook] Signature values differ despite matching length — the configured secret likely doesn't match between GitHub and Vercel."
+    );
+  }
+  return valid;
 }
 
 /**
