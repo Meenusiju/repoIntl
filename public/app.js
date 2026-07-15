@@ -13,6 +13,7 @@ const repoList = document.getElementById("repoList");
 const repoListSection = document.getElementById("repoListSection");
 const reportSection = document.getElementById("reportSection");
 const reportContent = document.getElementById("reportContent");
+const docsPrBanner = document.getElementById("docsPrBanner");
 const backBtn = document.getElementById("backBtn");
 const chatMessages = document.getElementById("chatMessages");
 const chatInput = document.getElementById("chatInput");
@@ -107,7 +108,10 @@ async function loadRepoList() {
     repoList.innerHTML = "";
     repos.forEach((repo) => {
       const li = document.createElement("li");
-      li.innerHTML = `<span>${repo.repoUrl}</span><span class="status-badge status-${repo.status}">${repo.status}</span>`;
+      const prBadge = repo.lastDocsPrUrl
+        ? `<span class="docs-pr-badge" title="Docs PR ready for review">\u{1F4C4} PR</span>`
+        : "";
+      li.innerHTML = `<span>${repo.repoUrl} ${prBadge}</span><span class="status-badge status-${repo.status}">${repo.status}</span>`;
       li.onclick = () => openReport(repo.repoId);
       repoList.appendChild(li);
     });
@@ -129,12 +133,30 @@ async function openReport(repoId) {
       ? marked.parse(data.intakeReport)
       : "<p>No intake report available yet.</p>";
 
+    renderDocsPrBanner(data.metadata);
+
     chatMessages.innerHTML = "";
     chatSources.innerHTML = "";
     chatInput.value = "";
   } catch (err) {
     alert(err.message);
   }
+}
+
+function renderDocsPrBanner(metadata) {
+  if (!metadata || !metadata.lastDocsPrUrl) {
+    docsPrBanner.classList.add("hidden");
+    docsPrBanner.innerHTML = "";
+    return;
+  }
+  const when = metadata.lastDocsPrAt
+    ? new Date(metadata.lastDocsPrAt).toLocaleString()
+    : "";
+  docsPrBanner.innerHTML = `
+    <span>\u{1F4C4} Docs updated \u2014 a pull request is ready for review${when ? ` (${when})` : ""}.</span>
+    <a href="${metadata.lastDocsPrUrl}" target="_blank" rel="noopener noreferrer">View PR &rarr;</a>
+  `;
+  docsPrBanner.classList.remove("hidden");
 }
 
 async function sendQuery() {
