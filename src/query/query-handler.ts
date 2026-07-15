@@ -1,4 +1,5 @@
-import { getRepoPaths, loadMetadata } from "../repo-manager";
+import fs from "fs";
+import { getRepoPaths, loadMetadata, cloneRepo, listFiles } from "../repo-manager";
 import { embedText, callAgent } from "../mastra/llm-client";
 import { queryVectorStore, VectorSearchResult } from "./vector-search";
 import { grepRepository, GrepChunk } from "./live-grep";
@@ -69,7 +70,7 @@ async function runQuery(
       contextChunks = vectorResults.slice(0, 3);
       confidence = maxSimilarity;
     } else {
-      const grepChunks = fallbackToGrep(sourceDir, question);
+      const grepChunks = await fallbackToGrep(repoId, metadata.repoUrl, sourceDir, question);
       if (grepChunks.length > 0) {
         searchMethod = "grep";
         contextChunks = grepChunks;
@@ -87,7 +88,7 @@ async function runQuery(
 
     // Vector store missing/empty — fall back straight to grep.
     searchMethod = "grep";
-    contextChunks = fallbackToGrep(sourceDir, question);
+    contextChunks = await fallbackToGrep(repoId, metadata.repoUrl, sourceDir, question);
     confidence = 0;
     if (contextChunks.length === 0) {
       throw new Error(NO_ANSWER_MESSAGE);
@@ -132,7 +133,37 @@ Answer based on the context above. Reference specific sections (e.g., 'According
   };
 }
 
-function fallbackToGrep(sourceDir: string, question: string): VectorSearchResult[] {
+/**
+ * Ensures the repo's source is present on the local filesystem before
+ * grepping it. On Vercel, /tmp is wiped between cold starts/redeploys, so
+ * the source downloaded during onboarding may no longer exist even though
+ * the repo's metadata and vector chunks are safely in Supabase. In that
+ * case, silently re-download the source from GitHub (same zipball method
+ * used during onboarding) so live grep still has something to search.
+ */
+async function ensureSourceAvailable(
+  repoId: string,
+  repoUrl: string | undefined,
+  sourceDir: string
+): Promise<void> {
+  const hasSource = fs.existsSync(sourceDir) && listFiles(sourceDir, 1).length > 0;
+  if (hasSource) return;
+  if (!repoUrl) return;
+  try {
+    console.log(`[query:${repoId}] Source missing locally (likely a fresh cold start) — re-downloading from ${repoUrl}...`);
+    await cloneRepo(repoUrl, repoId);
+  } catch (err: any) {
+    console.warn(`[query:${repoId}] Failed to re-download source for grep fallback: ${err.message}`);
+  }
+}
+
+async function fallbackToGrep(
+  repoId: string,
+  repoUrl: string | undefined,
+  sourceDir: string,
+  question: string
+): Promise<VectorSearchResult[]> {
+  await ensureSourceAvailable(repoId, repoUrl, sourceDir);
   const grepChunks: GrepChunk[] = grepRepository(sourceDir, question, 5);
 
   return grepChunks.map((g) => ({
