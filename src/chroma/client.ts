@@ -3,7 +3,13 @@ import fs from "fs";
 import path from "path";
 
 const CHROMA_URL = process.env.CHROMA_URL || "http://localhost:8000";
-const LOCAL_STORE_ROOT = path.join(process.cwd(), "repos", ".chroma-local");
+// Vercel serverless functions have a read-only filesystem except for /tmp
+// (writable but ephemeral). Locally we keep using ./repos so the local
+// vector store persists across restarts, matching REPOS_ROOT in
+// repo-manager.ts.
+const LOCAL_STORE_ROOT = process.env.VERCEL
+  ? path.join("/tmp", "repos", ".chroma-local")
+  : path.join(process.cwd(), "repos", ".chroma-local");
 
 export interface ChromaCollection {
   id: string;

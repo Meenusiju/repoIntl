@@ -78,19 +78,15 @@ export async function callAgent(options: CallAgentOptions): Promise<string> {
       try {
         return await attempt();
       } catch (retryErr: any) {
-        console.error(
-          "[llm-client] Retry also failed. Full error:",
-          retryErr
-        );
-        throw new Error(
-          `Anthropic API error after retry: ${describeError(retryErr)}`
-        );
+        const safeMessage = describeError(retryErr);
+        console.error(`[llm-client] Retry also failed: ${safeMessage}`);
+        throw new Error(`Anthropic API error after retry: ${safeMessage}`);
       }
     }
     if (status === 401) {
       throw new Error("Anthropic API error: invalid API key (401).");
     }
-    console.error("[llm-client] Anthropic call failed. Full error:", err);
+    console.error(`[llm-client] Anthropic call failed: ${describeError(err)}`);
     throw new Error(`Anthropic API error: ${describeError(err)}`);
   }
 }
@@ -109,7 +105,17 @@ function describeError(err: any): string {
   if (err?.cause?.code) parts.push(`code: ${err.cause.code}`);
   if (err?.code && err.code !== err?.cause?.code) parts.push(`code: ${err.code}`);
   if (err?.status) parts.push(`status: ${err.status}`);
-  return parts.length > 0 ? parts.join(" | ") : String(err);
+  const combined = parts.length > 0 ? parts.join(" | ") : String(err);
+  return redactApiKeys(combined);
+}
+
+/**
+ * Strips any Anthropic-style API key (sk-ant-...) that may have leaked into
+ * an error message — this happens when Node's HTTP client rejects an
+ * invalid header value and echoes the offending string back verbatim.
+ */
+function redactApiKeys(text: string): string {
+  return text.replace(/sk-ant-[A-Za-z0-9_-]+/g, "sk-ant-***REDACTED***");
 }
 
 /**
