@@ -106,7 +106,7 @@ app.post("/api/onboard", async (req, res) => {
 async function runOnboardingPipeline(repoId: string, repoUrl: string) {
   console.log(`[onboard:${repoId}] Cloning ${repoUrl}...`);
   updateStatus(repoId, { status: "cloning", progress: 5 });
-  const sourceDir = cloneRepo(repoUrl, repoId);
+  const sourceDir = await cloneRepo(repoUrl, repoId);
 
   console.log(`[onboard:${repoId}] Listing files...`);
   const fileList = listFiles(sourceDir);

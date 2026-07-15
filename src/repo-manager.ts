@@ -1,6 +1,7 @@
-import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
+import fetch from "node-fetch";
+import AdmZip from "adm-zip";
 
 // Vercel serverless functions have a read-only filesystem except for /tmp,
 // which is writable but ephemeral (reset between invocations/cold starts).
@@ -49,10 +50,12 @@ export function getRepoPaths(repoId: string) {
 }
 
 /**
- * Clones a public GitHub repo into /repos/{repoId}/source with a timeout.
+ * Downloads a public GitHub repo's default-branch snapshot via the GitHub
+ * REST API (a zipball, no `git` binary required — Vercel serverless
+ * functions don't ship one) and extracts it into /repos/{repoId}/source.
  * Throws descriptive errors for common failure modes.
  */
-export function cloneRepo(repoUrl: string, repoId: string): string {
+export async function cloneRepo(repoUrl: string, repoId: string): Promise<string> {
   const { repoRoot, sourceDir } = getRepoPaths(repoId);
 
   if (fs.existsSync(sourceDir)) {
@@ -60,39 +63,87 @@ export function cloneRepo(repoUrl: string, repoId: string): string {
   }
   fs.mkdirSync(repoRoot, { recursive: true });
 
-  try {
-    execSync(`git clone --depth 1 "${repoUrl}" "${sourceDir}"`, {
-      timeout: 5 * 60 * 1000, // 5 minutes
-      stdio: "pipe",
-    });
-  } catch (err: any) {
-    const stderr = err?.stderr?.toString?.() || err?.message || "";
-    if (/could not read Username|Authentication failed|403/i.test(stderr)) {
+  const cleaned = repoUrl.trim().replace(/\.git$/, "").replace(/\/$/, "");
+  const match = cleaned.match(/github\.com[/:]([^/]+)\/([^/]+)$/i);
+  if (!match) {
+    throw new Error(`Invalid GitHub URL: "${repoUrl}"`);
+  }
+  const [, owner, repo] = match;
+
+  const authHeaders: Record<string, string> = process.env.GITHUB_TOKEN
+    ? { Authorization: `token ${process.env.GITHUB_TOKEN}` }
+    : {};
+
+  // Try common default branches in order; GitHub's zipball endpoint 404s if
+  // the ref doesn't exist, so we fall back until one succeeds.
+  const branchesToTry = ["main", "master"];
+  let lastError = "";
+
+  for (const branch of branchesToTry) {
+    const zipUrl = `https://api.github.com/repos/${owner}/${repo}/zipball/${branch}`;
+    let response;
+    try {
+      response = await fetch(zipUrl, {
+        headers: { ...authHeaders, "User-Agent": "RepoIntel" },
+        timeout: 5 * 60 * 1000,
+      });
+    } catch (err: any) {
+      lastError = err.message || String(err);
+      continue;
+    }
+
+    if (response.status === 404) {
+      lastError = `404 for branch "${branch}"`;
+      continue;
+    }
+    if (response.status === 401 || response.status === 403) {
       throw new Error(
-        "Private repo detected. Phase 1 supports public repos only."
+        "Private repo detected or access denied. Phase 1 supports public repos only."
       );
     }
-    if (/repository .* not found|404/i.test(stderr)) {
-      throw new Error(`Repo not found (404): ${repoUrl}`);
+    if (!response.ok) {
+      lastError = `GitHub API returned ${response.status} ${response.statusText}`;
+      continue;
     }
-    if (err?.signal === "SIGTERM" || /timed out/i.test(stderr)) {
-      throw new Error(`git clone timed out after 5 minutes for ${repoUrl}`);
+
+    const buffer = await response.buffer();
+    let zip: AdmZip;
+    try {
+      zip = new AdmZip(buffer);
+    } catch (err: any) {
+      throw new Error(`Failed to read repo archive: ${err.message}`);
     }
-    throw new Error(`git clone failed: ${stderr || err.message}`);
+
+    zip.extractAllTo(sourceDir, true);
+
+    // GitHub's zipball wraps everything in a single "owner-repo-<sha>/"
+    // folder. Flatten it so sourceDir directly contains the repo's files.
+    const entries = fs.readdirSync(sourceDir, { withFileTypes: true });
+    const wrapperDirs = entries.filter((e) => e.isDirectory());
+    if (wrapperDirs.length === 1 && entries.length === 1) {
+      const wrapperPath = path.join(sourceDir, wrapperDirs[0].name);
+      for (const item of fs.readdirSync(wrapperPath)) {
+        fs.renameSync(path.join(wrapperPath, item), path.join(sourceDir, item));
+      }
+      fs.rmSync(wrapperPath, { recursive: true, force: true });
+    }
+
+    validateRepoStructure(sourceDir);
+    return sourceDir;
   }
 
-  validateRepoStructure(sourceDir);
-  return sourceDir;
+  if (/404/.test(lastError)) {
+    throw new Error(`Repo not found (404): ${repoUrl}`);
+  }
+  if (/timeout|timed out/i.test(lastError)) {
+    throw new Error(`Repo download timed out for ${repoUrl}`);
+  }
+  throw new Error(`Failed to download repo: ${lastError || "unknown error"}`);
 }
 
 export function validateRepoStructure(sourceDir: string): void {
   if (!fs.existsSync(sourceDir)) {
-    throw new Error("Cloned repo directory does not exist.");
-  }
-  const gitDir = path.join(sourceDir, ".git");
-  // With --depth 1 clone, .git exists as a directory in normal clones.
-  if (!fs.existsSync(gitDir)) {
-    throw new Error("Invalid repo structure: .git directory not found.");
+    throw new Error("Downloaded repo directory does not exist.");
   }
   const files = listFiles(sourceDir);
   const codeFiles = files.filter((f) => {

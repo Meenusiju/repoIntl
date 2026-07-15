@@ -46,7 +46,7 @@ async function main() {
 
   try {
     console.log("Cloning repository...");
-    const sourceDir = cloneRepo(repoUrl, repoId);
+    const sourceDir = await cloneRepo(repoUrl, repoId);
 
     console.log("Listing files...");
     const fileList = listFiles(sourceDir);
