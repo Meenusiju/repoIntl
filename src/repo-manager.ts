@@ -2,6 +2,15 @@ import fs from "fs";
 import path from "path";
 import fetch from "node-fetch";
 import AdmZip from "adm-zip";
+import { RepoMetadata } from "./types";
+import {
+  isSupabaseConfigured,
+  saveRepoMetadata,
+  getRepoMetadata,
+  getAllRepoIds,
+  saveIntakeReportToSupabase,
+  getIntakeReportFromSupabase,
+} from "./storage/supabase-client";
 
 // Vercel serverless functions have a read-only filesystem except for /tmp,
 // which is writable but ephemeral (reset between invocations/cold starts).
@@ -225,36 +234,54 @@ export function readRepoFile(
   }
 }
 
-export function saveMetadata(repoId: string, metadata: object): void {
+export async function saveMetadata(repoId: string, metadata: RepoMetadata): Promise<void> {
+  if (isSupabaseConfigured()) {
+    await saveRepoMetadata(repoId, metadata);
+    return;
+  }
   const { repoRoot, metadataPath } = getRepoPaths(repoId);
   fs.mkdirSync(repoRoot, { recursive: true });
   fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), "utf-8");
 }
 
-export function loadMetadata(repoId: string): any | null {
+export async function loadMetadata(repoId: string): Promise<RepoMetadata | null> {
+  if (isSupabaseConfigured()) {
+    return getRepoMetadata(repoId);
+  }
   const { metadataPath } = getRepoPaths(repoId);
   if (!fs.existsSync(metadataPath)) return null;
   return JSON.parse(fs.readFileSync(metadataPath, "utf-8"));
 }
 
-export function saveIntakeReport(repoId: string, markdown: string): void {
+export async function saveIntakeReport(repoId: string, markdown: string): Promise<void> {
+  if (isSupabaseConfigured()) {
+    await saveIntakeReportToSupabase(repoId, markdown);
+    return;
+  }
   const { repoRoot, intakeMdPath } = getRepoPaths(repoId);
   fs.mkdirSync(repoRoot, { recursive: true });
   fs.writeFileSync(intakeMdPath, markdown, "utf-8");
 }
 
-export function loadIntakeReport(repoId: string): string | null {
+export async function loadIntakeReport(repoId: string): Promise<string | null> {
+  if (isSupabaseConfigured()) {
+    return getIntakeReportFromSupabase(repoId);
+  }
   const { intakeMdPath } = getRepoPaths(repoId);
   if (!fs.existsSync(intakeMdPath)) return null;
   return fs.readFileSync(intakeMdPath, "utf-8");
 }
 
 /**
- * Lists all repo IDs that have a metadata.json on disk (i.e. every repo
- * ever onboarded, regardless of current in-memory server state). Used to
- * rehydrate server state after a restart.
+ * Lists all repo IDs ever onboarded (i.e. every repo with saved metadata),
+ * regardless of current in-memory server state. Used to rehydrate server
+ * state after a restart / cold start. Reads from Supabase when configured
+ * (survives redeploys), otherwise from metadata.json files on disk.
  */
-export function listAllOnboardedRepoIds(): string[] {
+export async function listAllOnboardedRepoIds(): Promise<string[]> {
+  if (isSupabaseConfigured()) {
+    return getAllRepoIds();
+  }
   if (!fs.existsSync(REPOS_ROOT)) return [];
   return fs
     .readdirSync(REPOS_ROOT, { withFileTypes: true })

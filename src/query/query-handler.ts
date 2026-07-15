@@ -39,7 +39,7 @@ async function runQuery(
   validateInput(repoId, question);
 
   const { sourceDir } = getRepoPaths(repoId);
-  const metadata = loadMetadata(repoId);
+  const metadata = await loadMetadata(repoId);
   if (!metadata) {
     throw new Error(`Repo "${repoId}" not found.`);
   }
@@ -62,7 +62,7 @@ async function runQuery(
 
   stageStart = Date.now();
   try {
-    const vectorResults = queryVectorStore(repoId, questionEmbedding, 3);
+    const vectorResults = await queryVectorStore(repoId, questionEmbedding, 3);
     const maxSimilarity = vectorResults.length > 0 ? vectorResults[0].similarity : 0;
 
     if (maxSimilarity > SIMILARITY_THRESHOLD) {

@@ -1,6 +1,12 @@
 import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
+import {
+  isSupabaseConfigured,
+  saveVectorChunks,
+  getVectorChunks,
+  vectorChunksExist,
+} from "../storage/supabase-client";
 
 const CHROMA_URL = process.env.CHROMA_URL || "http://localhost:8000";
 // Vercel serverless functions have a read-only filesystem except for /tmp
@@ -188,6 +194,12 @@ export function localQueryCollection(
 export async function getOrCreateCollection(
   name: string
 ): Promise<ChromaCollection> {
+  if (isSupabaseConfigured()) {
+    // Collections are implicit in Supabase (grouped by repo_id foreign key
+    // on vector_chunks) — nothing to create ahead of time.
+    return { id: name, name };
+  }
+
   if (await isRemoteAvailable()) {
     try {
       return await remoteRequest<ChromaCollection>(`/api/v1/collections`, {
@@ -207,6 +219,19 @@ export async function getOrCreateCollection(
 export async function addToCollection(
   params: AddToCollectionParams
 ): Promise<void> {
+  const repoId = params.collectionId.replace(/^repo_/, "");
+
+  if (isSupabaseConfigured()) {
+    const chunks = params.ids.map((id, i) => ({
+      id,
+      embedding: params.embeddings[i],
+      document: params.documents[i],
+      metadata: params.metadatas[i],
+    }));
+    await saveVectorChunks(repoId, chunks);
+    return;
+  }
+
   if (await isRemoteAvailable()) {
     try {
       await remoteRequest<void>(
@@ -253,13 +278,43 @@ export function collectionNameForRepo(repoId: string): string {
  * exist locally. Used by the query layer (Phase 2) for vector search that
  * needs chunk IDs, independent of whether a remote Chroma is configured.
  */
-export function readLocalCollection(name: string): LocalCollectionFile | null {
+/**
+ * Reads the raw collection data (chunk id + embedding + document +
+ * metadata for every stored chunk). Returns null if the collection doesn't
+ * exist. Used by the query layer (Phase 2) for vector search that needs
+ * chunk IDs, independent of whether a remote Chroma is configured.
+ *
+ * Prefers Supabase (survives Vercel redeploys) when configured, otherwise
+ * falls back to the local JSON file (works out-of-the-box for local dev).
+ */
+export async function readLocalCollection(name: string): Promise<LocalCollectionFile | null> {
+  const repoId = name.replace(/^repo_/, "");
+
+  if (isSupabaseConfigured()) {
+    const chunks = await getVectorChunks(repoId);
+    if (chunks.length === 0) return null;
+    return {
+      id: name,
+      name,
+      items: chunks.map((c) => ({
+        id: c.id,
+        embedding: c.embedding,
+        document: c.document,
+        metadata: c.metadata,
+      })),
+    };
+  }
+
   const filePath = localCollectionPath(name);
   if (!fs.existsSync(filePath)) return null;
   return JSON.parse(fs.readFileSync(filePath, "utf-8"));
 }
 
-export function localCollectionExists(name: string): boolean {
+export async function localCollectionExists(name: string): Promise<boolean> {
+  const repoId = name.replace(/^repo_/, "");
+  if (isSupabaseConfigured()) {
+    return vectorChunksExist(repoId);
+  }
   return fs.existsSync(localCollectionPath(name));
 }
 

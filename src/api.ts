@@ -59,23 +59,25 @@ const inMemoryStatus = new Map<string, RepoMetadata>();
  * Rehydrates in-memory repo status from metadata.json files on disk so the
  * repo list and detail views survive server restarts.
  */
-function hydrateStatusFromDisk() {
-  const repoIds = listAllOnboardedRepoIds();
+async function hydrateStatusFromDisk() {
+  const repoIds = await listAllOnboardedRepoIds();
   for (const repoId of repoIds) {
-    const meta = loadMetadata(repoId);
+    const meta = await loadMetadata(repoId);
     if (meta) {
       inMemoryStatus.set(repoId, meta);
     }
   }
   console.log(`Rehydrated ${repoIds.length} onboarded repo(s) from disk.`);
 }
-hydrateStatusFromDisk();
+hydrateStatusFromDisk().catch((err) => {
+  console.error("Failed to rehydrate status from storage:", err.message);
+});
 
-function updateStatus(repoId: string, patch: Partial<RepoMetadata>) {
+async function updateStatus(repoId: string, patch: Partial<RepoMetadata>): Promise<void> {
   const current = inMemoryStatus.get(repoId) || ({} as RepoMetadata);
   const updated: RepoMetadata = { ...current, ...patch, repoId };
   inMemoryStatus.set(repoId, updated);
-  saveMetadata(repoId, updated);
+  await saveMetadata(repoId, updated);
 }
 
 app.post("/api/onboard", async (req, res) => {
@@ -96,7 +98,7 @@ app.post("/api/onboard", async (req, res) => {
     status: "cloning",
     progress: 0,
   };
-  updateStatus(repoId, initialMeta);
+  await updateStatus(repoId, initialMeta);
 
   const response: OnboardResponse = { repoId, status: "cloning" };
   res.status(202).json(response);
@@ -104,20 +106,20 @@ app.post("/api/onboard", async (req, res) => {
   // Run the full onboarding pipeline in the background.
   runOnboardingPipeline(repoId, body.repoUrl).catch((err) => {
     console.error(`[onboard:${repoId}] Pipeline failed:`, err.message);
-    updateStatus(repoId, { status: "failed", error: err.message });
+    updateStatus(repoId, { status: "failed", error: err.message }).catch(() => {});
   });
 });
 
 async function runOnboardingPipeline(repoId: string, repoUrl: string) {
   console.log(`[onboard:${repoId}] Cloning ${repoUrl}...`);
-  updateStatus(repoId, { status: "cloning", progress: 5 });
+  await updateStatus(repoId, { status: "cloning", progress: 5 });
   const sourceDir = await cloneRepo(repoUrl, repoId);
 
   console.log(`[onboard:${repoId}] Listing files...`);
   const fileList = listFiles(sourceDir);
 
   console.log(`[onboard:${repoId}] Running 6 agents in parallel...`);
-  updateStatus(repoId, { status: "analyzing", progress: 15 });
+  await updateStatus(repoId, { status: "analyzing", progress: 15 });
 
   const ctx = {
     repoId,
@@ -136,27 +138,27 @@ async function runOnboardingPipeline(repoId: string, repoUrl: string) {
         status: "analyzing",
         progress,
         currentAgent: agentName,
-      });
+      }).catch((err) => console.error(`[onboard:${repoId}] status update failed:`, err.message));
     } else if (agentName === "Synthesizer Agent" && status === "running") {
       updateStatus(repoId, {
         status: "synthesizing",
         progress: 70,
         currentAgent: agentName,
-      });
+      }).catch((err) => console.error(`[onboard:${repoId}] status update failed:`, err.message));
     }
   });
 
   console.log(`[onboard:${repoId}] Saving intake report...`);
-  saveIntakeReport(repoId, report);
+  await saveIntakeReport(repoId, report);
 
   console.log(`[onboard:${repoId}] Indexing in Chroma...`);
-  updateStatus(repoId, { status: "indexing", progress: 85 });
+  await updateStatus(repoId, { status: "indexing", progress: 85 });
   const indexResult = await indexIntakeReport(repoId, report);
   console.log(
     `[onboard:${repoId}] Indexed ${indexResult.chunkCount} chunks into ${indexResult.collectionName}`
   );
 
-  updateStatus(repoId, {
+  await updateStatus(repoId, {
     status: "completed",
     progress: 100,
     currentAgent: undefined,
@@ -165,9 +167,9 @@ async function runOnboardingPipeline(repoId: string, repoUrl: string) {
   console.log(`[onboard:${repoId}] Onboarding complete.`);
 }
 
-app.get("/api/repos/:repoId/status", (req, res) => {
+app.get("/api/repos/:repoId/status", async (req, res) => {
   const { repoId } = req.params;
-  const meta = inMemoryStatus.get(repoId) || loadMetadata(repoId);
+  const meta = inMemoryStatus.get(repoId) || (await loadMetadata(repoId));
   if (!meta) {
     return res.status(404).json({ error: "Repo not found" });
   }
@@ -181,13 +183,13 @@ app.get("/api/repos/:repoId/status", (req, res) => {
   res.json(response);
 });
 
-app.get("/api/repos/:repoId", (req, res) => {
+app.get("/api/repos/:repoId", async (req, res) => {
   const { repoId } = req.params;
-  const meta = inMemoryStatus.get(repoId) || loadMetadata(repoId);
+  const meta = inMemoryStatus.get(repoId) || (await loadMetadata(repoId));
   if (!meta) {
     return res.status(404).json({ error: "Repo not found" });
   }
-  const intakeReport = loadIntakeReport(repoId) || undefined;
+  const intakeReport = (await loadIntakeReport(repoId)) || undefined;
   const response: RepoDetailResponse = {
     repoId,
     status: meta.status,
@@ -257,7 +259,7 @@ function verifyGithubSignature(rawBody: Buffer | undefined, signatureHeader: str
  * Unknown/not-yet-onboarded repos and non-push events are acknowledged but
  * ignored.
  */
-app.post("/api/webhooks/github", (req, res) => {
+app.post("/api/webhooks/github", async (req, res) => {
   const signature = req.header("x-hub-signature-256");
   const event = req.header("x-github-event");
   const delivery = req.header("x-github-delivery");
@@ -299,7 +301,7 @@ app.post("/api/webhooks/github", (req, res) => {
     return;
   }
 
-  const existing = inMemoryStatus.get(repoId) || loadMetadata(repoId);
+  const existing = inMemoryStatus.get(repoId) || (await loadMetadata(repoId));
   if (!existing) {
     console.log(`[webhook] Push to ${repoUrl} (${ref}) ignored — repo has not been onboarded yet`);
     return;
@@ -345,7 +347,7 @@ async function runMergeAnalysisPipeline(
     return;
   }
 
-  const oldReport = loadIntakeReport(repoId);
+  const oldReport = await loadIntakeReport(repoId);
   if (!oldReport) {
     console.warn(`[merge-analysis:${repoId}] No existing intake report on disk; skipping (run a full onboard first).`);
     return;
@@ -385,14 +387,14 @@ async function runMergeAnalysisPipeline(
 
   // Re-index the updated report so /api/query reflects the new content too,
   // even before the PR is merged (dashboard chat should stay current).
-  saveIntakeReport(repoId, updatedReport);
+  await saveIntakeReport(repoId, updatedReport);
   try {
     await indexIntakeReport(repoId, updatedReport);
   } catch (err: any) {
     console.warn(`[merge-analysis:${repoId}] Re-indexing after doc update failed (non-fatal): ${err.message}`);
   }
 
-  updateStatus(repoId, {
+  await updateStatus(repoId, {
     lastDocsPrUrl: pr.prUrl,
     lastDocsPrAt: new Date().toISOString(),
   });

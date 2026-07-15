@@ -42,7 +42,7 @@ async function main() {
     status: "cloning",
     progress: 0,
   };
-  saveMetadata(repoId, meta);
+  await saveMetadata(repoId, meta);
 
   try {
     console.log("Cloning repository...");
@@ -65,7 +65,7 @@ async function main() {
     });
 
     console.log("Saving intake report...");
-    saveIntakeReport(repoId, report);
+    await saveIntakeReport(repoId, report);
 
     console.log("Indexing in Chroma...");
     const indexResult = await indexIntakeReport(repoId, report);
@@ -73,11 +73,11 @@ async function main() {
       `Indexed ${indexResult.chunkCount} chunks into collection "${indexResult.collectionName}".`
     );
 
-    saveMetadata(repoId, { ...meta, status: "completed", progress: 100 });
+    await saveMetadata(repoId, { ...meta, status: "completed", progress: 100 });
     console.log(`\nDone! Intake report saved to /repos/${repoId}/intake.md`);
   } catch (err: any) {
     console.error(`\nOnboarding failed: ${err.message}`);
-    saveMetadata(repoId, { ...meta, status: "failed", error: err.message });
+    await saveMetadata(repoId, { ...meta, status: "failed", error: err.message });
     process.exit(1);
   }
 }

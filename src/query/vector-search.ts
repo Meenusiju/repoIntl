@@ -35,24 +35,25 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /**
- * Queries the local JSON vector store for the top-K chunks most similar to
- * the given question embedding. Throws if the repo's collection doesn't
- * exist (i.e. the repo was never indexed).
+ * Queries the vector store (Supabase when configured, else the local JSON
+ * fallback) for the top-K chunks most similar to the given question
+ * embedding. Throws if the repo's collection doesn't exist (i.e. the repo
+ * was never indexed).
  */
-export function queryVectorStore(
+export async function queryVectorStore(
   repoId: string,
   questionEmbedding: number[],
   topK = 3
-): VectorSearchResult[] {
+): Promise<VectorSearchResult[]> {
   const collectionName = collectionNameForRepo(repoId);
 
-  if (!localCollectionExists(collectionName)) {
+  if (!(await localCollectionExists(collectionName))) {
     throw new Error(
       `No indexed data found for repo "${repoId}". It may not be onboarded yet or is still being analyzed.`
     );
   }
 
-  const collection = readLocalCollection(collectionName);
+  const collection = await readLocalCollection(collectionName);
   if (!collection || collection.items.length === 0) {
     throw new Error(`Vector store for repo "${repoId}" is empty.`);
   }
